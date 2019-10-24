@@ -27,7 +27,7 @@ class ResBlock(nn.Module):
         return x
 
 
-class StandardResBlock(ResBlock):
+class BasicResBlock(ResBlock):
     """
     ResBlock as used in the vanilla ResNet.
     See https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py#L35.
@@ -49,7 +49,7 @@ class StandardResBlock(ResBlock):
                 norm_type(out_channels),
             )
 
-        super(StandardResBlock, self).__init__(
+        super(BasicResBlock, self).__init__(
             main=nn.Sequential(OrderedDict([
                 ('conv1', conv_type(in_channels=in_channels, out_channels=out_channels,
                                     kernel_size=pre_kernel_size, stride=stride)),
