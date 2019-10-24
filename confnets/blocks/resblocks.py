@@ -21,7 +21,7 @@ class ResBlock(nn.Module):
             skip = self.skip(x)
         else:
             skip = x
-        x = skip + self.inner(x)
+        x = skip + self.main(x)
         if self.post is not None:
             x = self.post(x)
         return x
