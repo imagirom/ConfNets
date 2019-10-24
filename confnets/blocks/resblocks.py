@@ -6,18 +6,18 @@ class ResBlock(nn.Module):
     """
     General ResBlock with the option to have operations before and after and on the residual connection.
     """
-    def __init__(self, inner, pre=None, post=None, outer=None):
+    def __init__(self, main, pre=None, post=None, skip=None):
         super(ResBlock, self).__init__()
-        self.inner = inner
+        self.main = main
         self.pre = pre
         self.post = post
-        self.outer = outer
+        self.skip = skip
 
     def forward(self, x):
         if self.pre is not None:
             x = self.pre(x)
-        if hasattr(self, 'outer') and self.outer is not None:
-            skip = self.outer(x)
+        if hasattr(self, 'outer') and self.skip is not None:
+            skip = self.skip(x)
         else:
             skip = x
         x = skip + self.inner(x)
@@ -26,35 +26,11 @@ class ResBlock(nn.Module):
         return x
 
 
-class ResBlockSkeleton(nn.Module):
-    """
-    General ResBlock with the option to have operations before and after and on the residual connection.
-    """
-
-    def __init__(self, inner, pre=None, post=None, outer=None):
-        super(ResBlockSkeleton, self).__init__()
-        self.inner = inner
-        self.pre = pre
-        self.post = post
-        self.outer = outer
-
-    def forward(self, x):
-        if self.pre is not None:
-            x = self.pre(x)
-        if hasattr(self, 'outer') and self.outer is not None:
-            skip = self.outer(x)
-        else:
-            skip = x
-        x = skip + self.inner(x)
-        if self.post is not None:
-            x = self.post(x)
-        return x
-
-
-class StandardResBlock(nn.Module):
+class StandardResBlock(ResBlock):
     """
     ResBlock as used in the vanilla ResNet
     """
+    # TODO
 
 
 class ValidPadResBlock(ResBlock):
@@ -65,7 +41,7 @@ class ValidPadResBlock(ResBlock):
         f_main = f_in if f_main is None else f_main
         if isinstance(activation, str):
             activation = getattr(nn, activation)()
-        inner = nn.Sequential(
+        main = nn.Sequential(
             conv_type(f_in, f_main, kernel_size=1),
             activation,
             conv_type(f_main, f_main, kernel_size=kernel_size, padding=0),
@@ -73,9 +49,9 @@ class ValidPadResBlock(ResBlock):
             conv_type(f_main, f_in, kernel_size=1),
         )
         self.crop = (kernel_size - 1)//2
-        super(ValidPadResBlock, self).__init__(inner=inner, outer=self.outer)
+        super(ValidPadResBlock, self).__init__(main=main, outer=self.skip)
 
-    def outer(self, x):
+    def skip(self, x):
         crop = self.crop
         if crop == 0:
             return x
@@ -92,6 +68,6 @@ class SuperhumanSNEMIBlock(ResBlock):
         if f_out is None:
             f_out = f_main
         pre = conv_type(f_in, f_out, kernel_size=pre_kernel_size)
-        inner = nn.Sequential(conv_type(f_out, f_main, kernel_size=inner_kernel_size),
-                              conv_type(f_main, f_out, kernel_size=inner_kernel_size))
-        super(SuperhumanSNEMIBlock, self).__init__(pre=pre, inner=inner)
+        skip = nn.Sequential(conv_type(f_out, f_main, kernel_size=inner_kernel_size),
+                             conv_type(f_main, f_out, kernel_size=inner_kernel_size))
+        super(SuperhumanSNEMIBlock, self).__init__(pre=pre, main=skip)
