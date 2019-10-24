@@ -17,7 +17,7 @@ class ResBlock(nn.Module):
     def forward(self, x):
         if self.pre is not None:
             x = self.pre(x)
-        if hasattr(self, 'outer') and self.skip is not None:
+        if self.skip is not None:
             skip = self.skip(x)
         else:
             skip = x
@@ -42,13 +42,14 @@ class BasicResBlock(ResBlock):
             conv_type = nn.Conv2d
         if activation is None:
             activation = nn.ReLU(inplace=False)
-        if downsample is None and in_channels != out_channels:
+        if downsample is None and (in_channels != out_channels or stride != 1):
             downsample = nn.Sequential(
                 conv_type(in_channels=in_channels, out_channels=out_channels,
                           kernel_size=1, stride=stride),
                 norm_type(out_channels),
             )
-
+        assert isinstance(main_kernel_size, int) and main_kernel_size % 2 == 1, \
+            f'main_kernel_size must be odd. Got {main_kernel_size}.'
         super(BasicResBlock, self).__init__(
             main=nn.Sequential(OrderedDict([
                 ('conv1', conv_type(in_channels=in_channels, out_channels=out_channels,
@@ -56,7 +57,7 @@ class BasicResBlock(ResBlock):
                 ('norm1', norm_type(out_channels)),
                 ('activation', activation),
                 ('conv2', conv_type(in_channels=out_channels, out_channels=out_channels,
-                                    kernel_size=main_kernel_size)),
+                                    kernel_size=main_kernel_size, padding=(main_kernel_size-1)//2)),
                 ('norm2', norm_type(out_channels)),
                 ])),
             skip=downsample,
@@ -92,7 +93,7 @@ class BottleneckBlock(ResBlock):
                 ('norm1', norm_type(main_channels)),
                 ('activation1', activation),
                 ('conv2', conv_type(in_channels=main_channels, out_channels=main_channels,
-                                    kernel_size=3, stride=stride, groups=groups, dilation=dilation)),
+                                    kernel_size=3, stride=stride, groups=groups, dilation=dilation, padding=dilation)),
                 ('norm2', norm_type(main_channels)),
                 ('activation2', activation),
                 ('conv3', conv_type(in_channels=main_channels, out_channels=out_channels,
