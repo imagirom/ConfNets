@@ -10,6 +10,7 @@ of modules that require them. Hence, constructing complex models can sometimes b
 """
 
 # TODO: add option to have verbose delayed __init__
+# TODO: make it possible to load state_dicts
 
 INIT_DELAYED = None  # Tag for arguments that are left unassigned at first init
 
@@ -99,6 +100,7 @@ def _delayed_init_wrapper(cls, **infer_delayed_dict):
 
     # use docstring and __init__ signature of wrapped class
     DelayedInitClass.__doc__ = cls.__doc__
+    # TODO: add init_tensor to signature
     DelayedInitClass.__signature__ = sig
 
     return DelayedInitClass
@@ -128,9 +130,9 @@ _wrap_bilinear = _partial(
 )
 
 # wrap convolutional layers
-Conv1D = _wrap_in_channels(old.Conv1d)
-Conv2D = _wrap_in_channels(old.Conv2d)
-Conv3D = _wrap_in_channels(old.Conv3d)
+Conv1d = _wrap_in_channels(old.Conv1d)
+Conv2d = _wrap_in_channels(old.Conv2d)
+Conv3d = _wrap_in_channels(old.Conv3d)
 ConvTranspose1d = _wrap_in_channels(old.ConvTranspose1d)
 ConvTranspose2d = _wrap_in_channels(old.ConvTranspose2d)
 ConvTranspose3d = _wrap_in_channels(old.ConvTranspose3d)
@@ -167,14 +169,14 @@ if __name__ == '__main__':
     import torch
     # do not need to specify in_channels at initialization
     model = old.Sequential(
-        Conv1D(out_channels=5, kernel_size=1),
+        Conv1d(out_channels=5, kernel_size=1),
         BatchNorm1d(),
-        Conv1D(in_channels=INIT_DELAYED, out_channels=2, kernel_size=1),
+        Conv1d(in_channels=INIT_DELAYED, out_channels=2, kernel_size=1),
         GroupNorm(num_groups=2),
-        Conv1D(in_channels=2, out_channels=2, kernel_size=1),
-        Conv1D(INIT_DELAYED, 2, kernel_size=1),  # positional arguments work, too
+        Conv1d(in_channels=2, out_channels=2, kernel_size=1),
+        Conv1d(INIT_DELAYED, 2, kernel_size=1),  # positional arguments work, too
         InstanceNorm1d(track_running_stats=True),
-        ConvTranspose1d(out_channels=3, kernel_size=1)
+        ConvTranspose1d(out_channels=3, kernel_size=1, init_tensor=torch.zeros(1, 2, 10))
     )
 
     print('before first forward pass:')
