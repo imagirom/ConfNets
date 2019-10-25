@@ -1,11 +1,10 @@
-import torch.nn as nn
 import numpy as np
+from collections import OrderedDict
 
-from confnets.layers import Identity, Concatenate, Sum, ConvGRU, ShakeShakeMerge, Upsample, MultiplyByScalar
-from confnets.blocks import SuperhumanSNEMIBlock
-
-from inferno.extensions.layers.convolutional import ConvELU3D, Conv3D, BNReLUConv3D
-from inferno.extensions.layers.convolutional import ConvELU2D, Conv2D, BNReLUConv2D
+from ..nn import delayed_nn as nn
+from ..layers import Identity, Concatenate, Sum, ConvGRU, ShakeShakeMerge, Upsample, MultiplyByScalar
+from ..blocks import SuperhumanSNEMIBlock
+from ..utils import skip_none_sequential, get_padding
 
 
 class EncoderDecoderSkeleton(nn.Module):
@@ -100,7 +99,7 @@ class UNetSkeleton(EncoderDecoderSkeleton):
 
         super(UNetSkeleton, self).__init__(depth)
 
-    def construct_conv(self, f_in, f_out):
+    def construct_layer(self, f_in, f_out):
         pass
 
     def construct_merge_module(self, depth):
@@ -110,17 +109,18 @@ class UNetSkeleton(EncoderDecoderSkeleton):
         f_in = self.in_channels if depth == 0 else self.fmaps[depth - 1]
         f_out = self.fmaps[depth]
         return nn.Sequential(
-            self.construct_conv(f_in, f_out),
-            self.construct_conv(f_out, f_out)
+            self.construct_layer(f_in, f_out),
+            self.construct_layer(f_out, f_out)
         )
 
     def construct_decoder_module(self, depth):
         f_in = self.merged_fmaps[depth]
         f_intermediate = self.fmaps[depth]
-        f_out = self.out_channels if depth == 0 else self.fmaps[depth - 1]
+        # do not reduce to f_out yet - this is done in the output module
+        f_out = f_intermediate if depth == 0 else self.fmaps[depth - 1]
         return nn.Sequential(
-            self.construct_conv(f_in, f_intermediate),
-            self.construct_conv(f_intermediate, f_out)
+            self.construct_layer(f_in, f_intermediate),
+            self.construct_layer(f_intermediate, f_out)
         )
 
     def construct_base_module(self):
@@ -128,24 +128,18 @@ class UNetSkeleton(EncoderDecoderSkeleton):
         f_intermediate = self.fmaps[self.depth]
         f_out = self.fmaps[self.depth - 1]
         return nn.Sequential(
-            self.construct_conv(f_in, f_intermediate),
-            self.construct_conv(f_intermediate, f_out)
+            self.construct_layer(f_in, f_intermediate),
+            self.construct_layer(f_intermediate, f_out)
         )
 
 
-CONV_TYPES = {'vanilla': ConvELU3D,
-              'conv_bn': BNReLUConv3D,
-              'vanilla2D': ConvELU2D,
-              'conv_bn2D': BNReLUConv2D}
-
-ACTIVATIONS = {}
-
-
-class UNet3D(UNetSkeleton):
+class UNet3d(UNetSkeleton):
 
     def __init__(self,
                  scale_factor=2,
-                 conv_type='vanilla',
+                 conv_type='Conv3d',
+                 norm_type=None,
+                 activation='ReLU',
                  final_activation=None,
                  upsampling_mode='nearest',
                  skip_factor=1,
@@ -155,11 +149,35 @@ class UNet3D(UNetSkeleton):
 
         # parse conv_type
         if isinstance(conv_type, str):
-            assert conv_type in CONV_TYPES
-            self.conv_type = CONV_TYPES[conv_type]
-        else:
-            assert isinstance(conv_type, type)
-            self.conv_type = conv_type
+            assert hasattr(nn, conv_type), f'{conv_type} not found in nn'
+            conv_type = getattr(nn, conv_type)
+        assert callable(conv_type), f'conv_type has to be string or callable.'
+        self.conv_type = conv_type
+
+        # parse norm_type
+        if isinstance(norm_type, str):
+            assert hasattr(nn, norm_type), f'{norm_type} not found in nn'
+            norm_type = getattr(nn, norm_type)
+        if norm_type is None:
+            norm_type = lambda in_channels: None
+        assert callable(norm_type), \
+            f'norm_type has to be string, callable or None.'
+        self.norm_type = norm_type
+
+        # parse activation
+        if isinstance(activation, str):
+            assert hasattr(nn, activation), f'{activation} not found in nn'
+            activation = getattr(nn, activation)
+            assert isinstance(activation, type), f'{activation}, {type(activation)}'
+        if isinstance(activation, nn.Module):
+            activation_module = activation
+            activation = lambda: activation_module
+        assert callable(activation), \
+            f'activation has to be string, nn.Module or callable.'
+        self.activation = activation
+        
+        # shorthand dictionary for conv_type, norm_type and activation, e.g. for the initialization of blocks
+        self.conv_norm_act_dict = dict(conv_type=self.conv_type, norm_type=self.norm_type, activation=self.activation)
 
         # parse scale factor
         if isinstance(scale_factor, int):
@@ -183,16 +201,23 @@ class UNet3D(UNetSkeleton):
             divisibility_constraint *= np.array(scale_factor)
         self.divisibility_constraint = list(divisibility_constraint.astype(int))
 
-        super(UNet3D, self).__init__(*super_args, **super_kwargs)
+        super(UNet3d, self).__init__(*super_args, **super_kwargs)
 
-    def construct_conv(self, f_in, f_out, kernel_size=3):
-        return self.conv_type(f_in, f_out, kernel_size=kernel_size)
+    def construct_layer(self, f_in, f_out, kernel_size=3):
+        return skip_none_sequential(OrderedDict([
+            ('conv', self.conv_type(f_in, f_out, kernel_size=kernel_size, padding=get_padding(kernel_size))),
+            ('norm', self.norm_type(f_out)),
+            ('activation', self.activation())
+        ]))
 
     def construct_output_module(self):
         if self.final_activation is not None:
-            return self.final_activation[0]
+            return skip_none_sequential(OrderedDict([
+                ('final_conv', self.conv_type(self.fmaps[0], self.out_channels, kernel_size=1)),
+                ('final_activation', self.final_activation[0])
+            ]))
         else:
-            return Identity()
+            return self.conv_type(self.fmaps[0], self.out_channels, kernel_size=1)
 
     def construct_skip_module(self, depth):
         if self.skip_factor == 1:
@@ -223,16 +248,16 @@ class UNet3D(UNetSkeleton):
         assert all(input_.shape[-i] % self.divisibility_constraint[-i] == 0 for i in range(1, input_dim-1)), \
             f'Input shape {input_.shape[2:]} not suited for downsampling with factors {self.scale_factors}.' \
             f'Lengths of spatial axes must be multiples of {self.divisibility_constraint}.'
-        return super(UNet3D, self).forward(input_)
+        return super(UNet3d, self).forward(input_)
 
 
-class SuperhumanSNEMINet(UNet3D):
+class SuperhumanSNEMINet(UNet3d):
     # see https://arxiv.org/pdf/1706.00120.pdf
 
     def __init__(self,
                  in_channels=1, out_channels=1,
                  fmaps=(28, 36, 48, 64, 80),
-                 conv_type=ConvELU3D,
+                 conv_type='Conv3d',
                  scale_factor=(
                      (1, 2, 2),
                      (1, 2, 2),
@@ -260,28 +285,29 @@ class SuperhumanSNEMINet(UNet3D):
         f_in = self.fmaps[depth - 1] if depth != 0 else self.in_channels
         f_out = self.fmaps[depth]
         if depth != 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type)
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict)
         if depth == 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                         pre_kernel_size=(1, 5, 5), inner_kernel_size=(1, 3, 3))
 
     def construct_decoder_module(self, depth):
         f_in = self.fmaps[depth]
         f_out = self.fmaps[0] if depth == 0 else self.fmaps[depth - 1]
         if depth != 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type)
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict)
         if depth == 0:
             return nn.Sequential(
-                SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+                SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                      pre_kernel_size=(3, 3, 3), inner_kernel_size=(1, 3, 3)),
-                self.conv_type(f_out, self.out_channels, kernel_size=(1, 5, 5))
+                self.conv_type(f_out, self.out_channels, kernel_size=(1, 5, 5), padding=(0, 2, 2))
             )
 
     def construct_base_module(self):
         f_in = self.fmaps[self.depth - 1]
         f_intermediate = self.fmaps[self.depth]
         f_out = self.fmaps[self.depth - 1]
-        return SuperhumanSNEMIBlock(f_in=f_in, f_main=f_intermediate, f_out=f_out, conv_type=self.conv_type)
+        return SuperhumanSNEMIBlock(in_channels=f_in, main_channels=f_intermediate, out_channels=f_out, 
+                                    **self.conv_norm_act_dict)
 
 
 class ShakeShakeSNEMINet(SuperhumanSNEMINet):
@@ -296,40 +322,41 @@ class IsotropicSuperhumanSNEMINet(SuperhumanSNEMINet):
         f_in = self.fmaps[depth - 1] if depth != 0 else self.in_channels
         f_out = self.fmaps[depth]
         if depth != 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                         pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3))
         if depth == 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                         pre_kernel_size=(5, 5, 5), inner_kernel_size=(3, 3, 3))
 
     def construct_decoder_module(self, depth):
         f_in = self.fmaps[depth]
         f_out = self.fmaps[0] if depth == 0 else self.fmaps[depth - 1]
         if depth != 0:
-            return SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+            return SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                         pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3))
         if depth == 0:
             return nn.Sequential(
-                SuperhumanSNEMIBlock(f_in=f_in, f_out=f_out, conv_type=self.conv_type,
+                SuperhumanSNEMIBlock(in_channels=f_in, out_channels=f_out, **self.conv_norm_act_dict,
                                      pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3)),
-                self.conv_type(f_out, self.out_channels, kernel_size=(5, 5, 5))
+                self.conv_type(f_out, self.out_channels, kernel_size=(5, 5, 5), padding=(2, 2, 2))
             )
 
     def construct_base_module(self):
         f_in = self.fmaps[self.depth - 1]
         f_intermediate = self.fmaps[self.depth]
         f_out = self.fmaps[self.depth - 1]
-        return SuperhumanSNEMIBlock(f_in=f_in, f_main=f_intermediate, f_out=f_out, conv_type=self.conv_type,
+        return SuperhumanSNEMIBlock(in_channels=f_in, main_channels=f_intermediate, out_channels=f_out,
+                                    **self.conv_norm_act_dict,
                                     pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3))
 
 
-class UNet2D(UNet3D):
+class UNet2d(UNet3d):
 
     def __init__(self,
-                 conv_type='vanilla2D',
+                 conv_type='Conv2d',
                  *super_args, **super_kwargs):
         super_kwargs.update({"conv_type": conv_type})
-        super(UNet2D, self).__init__(*super_args, **super_kwargs)
+        super(UNet2d, self).__init__(*super_args, **super_kwargs)
 
     @property
     def dim(self):
@@ -343,50 +370,52 @@ class UNet2D(UNet3D):
         return sampler
 
 
-class RecurrentUNet2D(UNet2D):
+# The RecurrentUNet2d is currently not supported. Ask Roman if you are interested in using it.
 
-    def __init__(self,
-                 scale_factor=2,
-                 conv_type='vanilla2D',
-                 final_activation=None,
-                 rec_n_layers=3,
-                 rec_kernel_sizes=(3, 5, 3),
-                 rec_hidden_size=(16, 32, 8),
-                 *super_args, **super_kwargs):
-        self.rec_n_layers = rec_n_layers
-        self.rec_kernel_sizes = rec_kernel_sizes
-        self.rec_hidden_size = rec_hidden_size
-        self.rec_layers = []
-
-        super(UNet2D, self).__init__(scale_factor=scale_factor,
-                                     conv_type=conv_type,
-                                     final_activation=final_activation,
-                                     *super_args, **super_kwargs)
-
-    def construct_skip_module(self, depth):
-        self.rec_layers.append(ConvGRU(input_size=self.fmaps[depth],
-                                       hidden_size=self.fmaps[depth],
-                                       kernel_sizes=self.rec_kernel_sizes,
-                                       n_layers=self.rec_n_layers,
-                                       conv_type=self.conv_type))
-
-        return self.rec_layers[-1]
-
-    def set_sequence_length(self, sequence_length):
-        for r in self.rec_layers:
-            r.sequence_length = sequence_length
-
-    def forward(self, input_):
-        sequence_length = input_.shape[2]
-        batch_size = input_.shape[0]
-        flat_shape = [batch_size * sequence_length] + [input_.shape[1]] + list(input_.shape[3:])
-        flat_output_shape = [batch_size, sequence_length] + [self.out_channels] + list(input_.shape[3:])
-
-        transpose_input = input_.permute((0, 2, 1, 3, 4))\
-                                .contiguous()\
-                                .view(*flat_shape).detach()
-
-        self.set_sequence_length(sequence_length)
-        output = super(UNet2D, self).forward(transpose_input)
-        return output.view(*flat_output_shape).permute((0, 2, 1, 3, 4))
+# class RecurrentUNet2d(UNet2d):
+#
+#     def __init__(self,
+#                  scale_factor=2,
+#                  conv_type='Conv2d',
+#                  final_activation=None,
+#                  rec_n_layers=3,
+#                  rec_kernel_sizes=(3, 5, 3),
+#                  rec_hidden_size=(16, 32, 8),
+#                  *super_args, **super_kwargs):
+#         self.rec_n_layers = rec_n_layers
+#         self.rec_kernel_sizes = rec_kernel_sizes
+#         self.rec_hidden_size = rec_hidden_size
+#         self.rec_layers = []
+#
+#         super(UNet2d, self).__init__(scale_factor=scale_factor,
+#                                      conv_type=conv_type,
+#                                      final_activation=final_activation,
+#                                      *super_args, **super_kwargs)
+#
+#     def construct_skip_module(self, depth):
+#         self.rec_layers.append(ConvGRU(input_size=self.fmaps[depth],
+#                                        hidden_size=self.fmaps[depth],
+#                                        kernel_sizes=self.rec_kernel_sizes,
+#                                        n_layers=self.rec_n_layers,
+#                                        conv_type=self.conv_type))
+#
+#         return self.rec_layers[-1]
+#
+#     def set_sequence_length(self, sequence_length):
+#         for r in self.rec_layers:
+#             r.sequence_length = sequence_length
+#
+#     def forward(self, input_):
+#         sequence_length = input_.shape[2]
+#         batch_size = input_.shape[0]
+#         flat_shape = [batch_size * sequence_length] + [input_.shape[1]] + list(input_.shape[3:])
+#         flat_output_shape = [batch_size, sequence_length] + [self.out_channels] + list(input_.shape[3:])
+#
+#         transpose_input = input_.permute((0, 2, 1, 3, 4))\
+#                                 .contiguous()\
+#                                 .view(*flat_shape).detach()
+#
+#         self.set_sequence_length(sequence_length)
+#         output = super(UNet2d, self).forward(transpose_input)
+#         return output.view(*flat_output_shape).permute((0, 2, 1, 3, 4))
 

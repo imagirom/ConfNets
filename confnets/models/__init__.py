@@ -1,2 +1,2 @@
-from .unet import UNet3D, UNet2D, RecurrentUNet2D, SuperhumanSNEMINet, IsotropicSuperhumanSNEMINet
+from .unet import UNet3d, UNet2d, SuperhumanSNEMINet, IsotropicSuperhumanSNEMINet
 from .localnet import LocalNet
