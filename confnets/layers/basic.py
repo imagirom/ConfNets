@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
 
 
 class Identity(nn.Module):
@@ -69,4 +70,4 @@ class Upsample(nn.Module):
         self.scale_factor = scale_factor
 
     def forward(self, input):
-        return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode)
+        return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
