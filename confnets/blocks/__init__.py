@@ -1,1 +1,2 @@
-from .resblocks import ResBlock, ValidPadResBlock, SuperhumanSNEMIBlock, BasicResBlock, BottleneckBlock
+from .resblocks import ResBlock, ValidPadResBlock, SuperhumanSNEMIBlock, BasicResBlock, BottleneckBlock, \
+    ConvActConvNormBlock

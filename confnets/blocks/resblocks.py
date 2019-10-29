@@ -33,7 +33,6 @@ class BasicResBlock(ResBlock):
     ResBlock as used in the vanilla ResNet.
     See https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py#L35.
     """
-    # TODO: test this.
     def __init__(self, in_channels, out_channels, stride=1, downsample=None,
                  conv_type=None, norm_type=None, activation=None,
                  pre_kernel_size=1, main_kernel_size=3):
@@ -44,7 +43,7 @@ class BasicResBlock(ResBlock):
         if activation is None:
             activation = nn.ReLU
         if downsample is None and (in_channels != out_channels or stride != 1):
-            downsample = nn.Sequential(
+            downsample = skip_none_sequential(
                 conv_type(in_channels=in_channels, out_channels=out_channels,
                           kernel_size=1, stride=stride),
                 norm_type(out_channels),
@@ -54,7 +53,7 @@ class BasicResBlock(ResBlock):
         if pre_kernel_size > 1:
             raise NotImplementedError
         super(BasicResBlock, self).__init__(
-            main=nn.Sequential(OrderedDict([
+            main=skip_none_sequential(OrderedDict([
                 ('conv1', conv_type(in_channels=in_channels, out_channels=out_channels,
                                     kernel_size=pre_kernel_size, stride=stride)),
                 ('norm1', norm_type(out_channels)),
@@ -64,7 +63,7 @@ class BasicResBlock(ResBlock):
                 ('norm2', norm_type(out_channels)),
                 ])),
             skip=downsample,
-            post=activation
+            post=activation()
         )
 
 
@@ -74,7 +73,8 @@ class BottleneckBlock(ResBlock):
     See https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py#L76.
     """
 
-    def __init__(self, in_channels, out_channels, main_channels, stride=1, groups=1, dilation=1, downsample=None,
+    def __init__(self, in_channels, out_channels, main_channels=None, expansion=4,
+                 stride=1, groups=1, dilation=1, downsample=None,
                  conv_type=None, norm_type=None, activation=None):
         if norm_type is None:
             norm_type = nn.BatchNorm2d
@@ -83,14 +83,16 @@ class BottleneckBlock(ResBlock):
         if activation is None:
             activation = nn.ReLU
         if downsample is None and in_channels != out_channels:
-            downsample = nn.Sequential(
+            downsample = skip_none_sequential(
                 conv_type(in_channels=in_channels, out_channels=out_channels,
                           kernel_size=1, stride=stride),
                 norm_type(out_channels),
             )
+        if main_channels is None:
+            main_channels = out_channels // expansion
 
         super(BottleneckBlock, self).__init__(
-            main=nn.Sequential(OrderedDict([
+            main=skip_none_sequential(OrderedDict([
                 ('conv1', conv_type(in_channels=in_channels, out_channels=main_channels,
                                     kernel_size=1)),
                 ('norm1', norm_type(main_channels)),
@@ -108,6 +110,41 @@ class BottleneckBlock(ResBlock):
         )
 
 
+class ConvActConvNormBlock(ResBlock):
+    """
+    See https://arxiv.org/pdf/1604.04112.pdf.
+    """
+    def __init__(self, in_channels, out_channels, main_channels=None, expansion=4,
+                 stride=1, groups=1, dilation=1, downsample=None,
+                 conv_type=None, norm_type=None, activation=None):
+        if norm_type is None:
+            norm_type = nn.BatchNorm2d
+        if conv_type is None:
+            conv_type = nn.Conv2d
+        if activation is None:
+            activation = nn.ELU
+        if downsample is None and in_channels != out_channels:
+            downsample = skip_none_sequential(
+                conv_type(in_channels=in_channels, out_channels=out_channels,
+                          kernel_size=1, stride=stride),
+                norm_type(out_channels),
+            )
+        if main_channels is None:
+            main_channels = out_channels
+
+        super(ConvActConvNormBlock, self).__init__(
+            main=skip_none_sequential(OrderedDict([
+                ('conv1', conv_type(in_channels=in_channels, out_channels=main_channels,
+                                    kernel_size=1)),
+                ('activation1', activation()),
+                ('conv2', conv_type(in_channels=main_channels, out_channels=out_channels,
+                                    kernel_size=3, stride=stride, groups=groups, dilation=dilation, padding=dilation)),
+                ('norm1', norm_type(out_channels)),
+            ])),
+            skip=downsample,
+        )
+
+
 class ValidPadResBlock(ResBlock):
     """
     Residual block with valid padding.
@@ -119,7 +156,7 @@ class ValidPadResBlock(ResBlock):
         main_channels = in_channels if main_channels is None else main_channels
         if isinstance(activation, str):
             activation = getattr(nn, activation)
-        main = nn.Sequential(
+        main = skip_none_sequential(
             conv_type(in_channels, main_channels, kernel_size=1),
             activation(),
             conv_type(main_channels, main_channels, kernel_size=kernel_size, padding=0),
@@ -142,7 +179,7 @@ class SuperhumanSNEMIBlock(ResBlock):
                  conv_type=None, norm_type=None, activation=None,
                  pre_kernel_size=(1, 3, 3), inner_kernel_size=(3, 3, 3)):
         if main_channels is None:
-            main_channels = in_channels
+            main_channels = out_channels
         if out_channels is None:
             out_channels = main_channels
         if norm_type is None:
