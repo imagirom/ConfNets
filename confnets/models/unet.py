@@ -1,9 +1,12 @@
+import torch
 import numpy as np
 from collections import OrderedDict
+from functools import partial
 
 from ..nn import delayed_nn as nn
 from ..layers import Identity, Concatenate, Sum, ConvGRU, ShakeShakeMerge, Upsample, MultiplyByScalar
 from ..blocks import SuperhumanSNEMIBlock
+from .. import blocks
 from ..utils import skip_none_sequential, get_padding
 
 
@@ -13,10 +16,12 @@ class EncoderDecoderSkeleton(nn.Module):
     To use, inherit from this and implement a selection of the construct_* methods.
     To add side-outputs, use a wrapper
     """
+    # TODO: add input_module to draw.io
     def __init__(self, depth):
         super(EncoderDecoderSkeleton, self).__init__()
         self.depth = depth
         # construct all the layers
+        self.initial_module = self.construct_input_module()
         self.encoder_modules = nn.ModuleList(
             [self.construct_encoder_module(i) for i in range(depth)])
         self.skip_modules = nn.ModuleList(
@@ -34,7 +39,7 @@ class EncoderDecoderSkeleton(nn.Module):
 
     def forward(self, input):
         encoded_states = []
-        current = input
+        current = self.initial_module(input)
         for encode, downsample in zip(self.encoder_modules, self.downsampling_modules):
             current = encode(current)
             encoded_states.append(current)
@@ -48,6 +53,9 @@ class EncoderDecoderSkeleton(nn.Module):
             current = decode(current)
         current = self.final_module(current)
         return current
+
+    def construct_input_module(self):
+        return Identity()
 
     def construct_encoder_module(self, depth):
         return Identity()
@@ -133,11 +141,12 @@ class UNetSkeleton(EncoderDecoderSkeleton):
         )
 
 
-class UNet3d(UNetSkeleton):
+class UNet(UNetSkeleton):
 
     def __init__(self,
+                 dim=2,
                  scale_factor=2,
-                 conv_type='Conv3d',
+                 conv_type=None,
                  norm_type=None,
                  activation='ReLU',
                  final_activation=None,
@@ -145,9 +154,12 @@ class UNet3d(UNetSkeleton):
                  skip_factor=1,
                  *super_args, **super_kwargs):
 
+        self.dim = dim
         self.final_activation = [final_activation] if final_activation is not None else None
 
         # parse conv_type
+        if conv_type is None:
+            conv_type = f'Conv{self.dim}d'
         if isinstance(conv_type, str):
             assert hasattr(nn, conv_type), f'{conv_type} not found in nn'
             conv_type = getattr(nn, conv_type)
@@ -156,12 +168,17 @@ class UNet3d(UNetSkeleton):
 
         # parse norm_type
         if isinstance(norm_type, str):
-            assert hasattr(nn, norm_type), f'{norm_type} not found in nn'
-            norm_type = getattr(nn, norm_type)
+            if norm_type.startswith('GroupNorm'):
+                # Set requested number of groups
+                norm_type = partial(nn.GroupNorm, int(norm_type[9:]))
+            else:
+                # Get normalization from nn
+                assert hasattr(nn, norm_type), f'{norm_type} not found in nn'
+                norm_type = getattr(nn, norm_type)
         if norm_type is None:
             norm_type = lambda in_channels: None
         assert callable(norm_type), \
-            f'norm_type has to be string, callable or None.'
+            f'norm_type has to be string, callable or None'
         self.norm_type = norm_type
 
         # parse activation
@@ -201,7 +218,18 @@ class UNet3d(UNetSkeleton):
             divisibility_constraint *= np.array(scale_factor)
         self.divisibility_constraint = list(divisibility_constraint.astype(int))
 
-        super(UNet3d, self).__init__(*super_args, **super_kwargs)
+        super(UNet, self).__init__(*super_args, **super_kwargs)
+
+        # run a forward pass to initialize all submodules (with in_channels=nn.INIT_DELAYED)
+        with torch.no_grad():
+            inp = torch.zeros((2, self.in_channels, *self.divisibility_constraint), dtype=torch.float32)
+            self(inp)
+
+        # delete attributes that are only relevant for construction and might lead to errors when model is saved
+        del self.conv_type
+        del self.norm_type
+        del self.activation
+        del self.conv_norm_act_dict
 
     def construct_layer(self, f_in, f_out, kernel_size=3):
         return skip_none_sequential(OrderedDict([
@@ -225,16 +253,12 @@ class UNet3d(UNetSkeleton):
         else:
             return MultiplyByScalar(self.skip_factor)
 
-    @property
-    def dim(self):
-        return 3
-
     def construct_downsampling_module(self, depth):
         scale_factor = self.scale_factors[depth]
-        sampler = nn.MaxPool3d(kernel_size=scale_factor,
-                               stride=scale_factor,
-                               padding=0)
-        return sampler
+        maxpool = getattr(nn, f'MaxPool{self.dim}d')
+        return maxpool(kernel_size=scale_factor,
+                          stride=scale_factor,
+                          padding=0)
 
     def construct_upsampling_module(self, depth):
         scale_factor = self.scale_factors[depth]
@@ -248,12 +272,60 @@ class UNet3d(UNetSkeleton):
         assert all(input_.shape[-i] % self.divisibility_constraint[-i] == 0 for i in range(1, input_dim-1)), \
             f'Input shape {input_.shape[2:]} not suited for downsampling with factors {self.scale_factors}.' \
             f'Lengths of spatial axes must be multiples of {self.divisibility_constraint}.'
-        return super(UNet3d, self).forward(input_)
+        return super(UNet, self).forward(input_)
+
+
+class UNet2d(UNet):
+    def __init__(self, conv_type='Conv2d', **super_kwargs):
+        super_kwargs['conv_type'] = conv_type
+        super(UNet2d, self).__init__(dim=2, **super_kwargs)
+
+
+class UNet3d(UNet):
+    def __init__(self, conv_type='Conv3d', **super_kwargs):
+        super_kwargs['conv_type'] = conv_type
+        super(UNet3d, self).__init__(dim=3, **super_kwargs)
+
+
+class BlockyUNet(UNet):
+    # Note: The numbers of channels per depth works differently compared to default UNet..
+    # TODO: draw in draw.io
+    # TODO: add option to have true ResBlocks, with 1x1 between to change number of channels
+    def __init__(self, block_type='BasicResBlock', **super_kwargs):
+        # parse block_type
+        if isinstance(block_type, str):
+            assert hasattr(blocks, block_type), f'{block_type} not found in confnets.blocks'
+            block_type = getattr(blocks, block_type)
+        assert callable(block_type), f'block_type has to be string or callable.'
+        self.block_type = block_type
+        super(BlockyUNet, self).__init__(**super_kwargs)
+        # delete attributes that are only relevant for construction and might lead to errors when model is saved
+        del self.block_type
+
+    def construct_input_module(self):
+        return self.conv_type(self.in_channels, self.fmaps[0], kernel_size=3, padding=1)
+
+    def construct_encoder_module(self, depth):
+        return self.block_type(
+            in_channels=self.fmaps[depth],
+            out_channels=self.fmaps[depth+1],
+            **self.conv_norm_act_dict)
+
+    def construct_decoder_module(self, depth):
+        return self.block_type(
+            in_channels=nn.INIT_DELAYED,  # use delayed init
+            out_channels=self.fmaps[depth],
+            **self.conv_norm_act_dict)
+
+    def construct_base_module(self):
+        return self.block_type(
+            in_channels=self.fmaps[self.depth],
+            out_channels=self.fmaps[self.depth],
+            **self.conv_norm_act_dict)
 
 
 class SuperhumanSNEMINet(UNet3d):
     # see https://arxiv.org/pdf/1706.00120.pdf
-
     def __init__(self,
                  in_channels=1, out_channels=1,
                  fmaps=(28, 36, 48, 64, 80),
@@ -348,26 +420,6 @@ class IsotropicSuperhumanSNEMINet(SuperhumanSNEMINet):
         return SuperhumanSNEMIBlock(in_channels=f_in, main_channels=f_intermediate, out_channels=f_out,
                                     **self.conv_norm_act_dict,
                                     pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3))
-
-
-class UNet2d(UNet3d):
-
-    def __init__(self,
-                 conv_type='Conv2d',
-                 *super_args, **super_kwargs):
-        super_kwargs.update({"conv_type": conv_type})
-        super(UNet2d, self).__init__(*super_args, **super_kwargs)
-
-    @property
-    def dim(self):
-        return 2
-
-    def construct_downsampling_module(self, depth):
-        scale_factor = self.scale_factors[depth]
-        sampler = nn.MaxPool2d(kernel_size=scale_factor,
-                               stride=scale_factor,
-                               padding=0)
-        return sampler
 
 
 # The RecurrentUNet2d is currently not supported. Ask Roman if you are interested in using it.
