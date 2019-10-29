@@ -1,10 +1,10 @@
 ## convnets.nn
 
-`convents.nn` is a drop-in replacement for `torch.nn`, where layer parameters that can be inferred from the input, such as the number of input channels, do not have to be specified at initialization.
+`convents.nn` is a drop-in replacement for `torch.nn` where layer parameters that can be inferred from the input, such as the number of input channels, do not have to be specified at initialization.
 
-It works by wrapping the classes of layers in `torch.nn` and only calling the `__init__` of the super class during the first forward pass. 
+It works by wrapping the classes of layers in `torch.nn` and only calling the `__init__` of the original class during the first forward pass. 
 After that, everything is fixed and the layer will be indistinguishable from a layer from `torch.nn` that was initialized in the usual way.
-Saving and loading models 
+Saving and loading models is possible with `torch.save` and `torch.load` as usual, after all layers are fully initialized (i.e. after the first forward pass).
 
 ### Example
 
