@@ -114,24 +114,3 @@ class UpsampleAndCrop(nn.Module):
         return output
 
 
-class AutoPad(nn.Module):
-    """
-    Used to auto-pad the multiple UNet inputs passed at different resolutions
-    """
-    def __init__(self):
-        super(AutoPad, self).__init__()
-
-    def forward(self, to_be_padded, out_shape):
-        in_shape = to_be_padded.shape[2:]
-        out_shape = out_shape[2:]
-        if in_shape != out_shape:
-            diff = [trg-orig for orig, trg in zip(in_shape, out_shape)]
-            assert all([d>=0 for d in diff]), "Output shape should be bigger"
-            assert all([d % 2 == 0 for d in diff]), "Odd difference in shape!"
-            # F.pad expects the last dim first:
-            diff.reverse()
-            pad = []
-            for d in diff:
-                pad += [int(d/2), int(d/2)]
-            to_be_padded = torch.nn.functional.pad(to_be_padded, tuple(pad), mode='constant', value=0)
-        return to_be_padded
