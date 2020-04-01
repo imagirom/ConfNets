@@ -209,7 +209,7 @@ class SuperhumanSNEMIBlock(ResBlock):
         )
 
 
-class ConvNormActResBlock(ResBlock):
+class SamePadResBlock(ResBlock):
     """
     ResBlock with 'SAME' padding used for Single-Instance Mask prediction
     and inspired by http://arxiv.org/abs/1909.09872
@@ -274,7 +274,7 @@ class ConvNormActResBlock(ResBlock):
             post.append(conv3.activation)
         post = None if len(post) == 0 else nn.Sequential(tuple(post))
 
-        super(ConvNormActResBlock, self).__init__(
+        super(SamePadResBlock, self).__init__(
             main,
             skip=skip_con,
             post=post

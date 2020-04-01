@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import warnings
 
-from inferno.extensions.layers.convolutional import ConvActivation
-
+from ..utils import parse_data_slice
 
 class Identity(nn.Module):
     def __init__(self):
@@ -75,50 +74,64 @@ class Upsample(nn.Module):
         return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
 
 
-class ConvNormActivation(ConvActivation):
-    """
-    Convolutional layer with 'SAME' padding by default followed by a normalization and activation layer.
-    (generalization of ConvActivation in inferno)
-    """
-    def __init__(self, in_channels,
-                 out_channels,
-                 kernel_size,
-                 dim,
-                 activation,
-                 normalization=None,
-                 nb_norm_groups=None,
-                 **super_kwargs):
-        super(ConvNormActivation, self).__init__(in_channels, out_channels, kernel_size,
-                                                 dim, activation, **super_kwargs)
 
-        if isinstance(normalization, str):
-            if normalization == "GroupNorm":
-                assert nb_norm_groups is not None
-                self.normalization = getattr(nn, normalization)(num_groups=nb_norm_groups,
-                                                            num_channels=out_channels)
-            else:
-                self.normalization = getattr(nn, normalization)(out_channels)
-        elif isinstance(normalization, nn.Module):
-            if isinstance(normalization, nn.GroupNorm):
-                assert nb_norm_groups is not None
-                self.normalization = normalization(num_groups=nb_norm_groups,
-                                                   num_channels=out_channels)
-            else:
-                self.normalization = normalization(out_channels)
-        elif normalization is None:
-            self.normalization = None
-        else:
-            raise NotImplementedError
+class Crop(nn.Module):
+    """
+    Crop a tensor according to the given string representing the crop slice
+    """
+    def __init__(self, crop_slice):
+        super(Crop, self).__init__()
+        self.crop_slice = crop_slice
+
+        if self.crop_slice is not None:
+            assert isinstance(self.crop_slice, str)
+            self.crop_slice = (slice(None), slice(None)) + parse_data_slice(self.crop_slice)
 
     def forward(self, input):
-        conved = self.conv(input)
-        if self.normalization is not None:
-            normalized = self.normalization(conved)
+        if isinstance(input, tuple):
+            raise NotImplementedError("At the moment only one input is accepted")
+        if self.crop_slice is not None:
+            return input[self.crop_slice]
         else:
-            normalized = conved
-        if self.activation is not None:
-            activated = self.activation(normalized)
-        else:
-            # No activation
-            activated = normalized
-        return activated
+            return input
+
+
+class UpsampleAndCrop(nn.Module):
+    """
+    Combination of Upsample and Crop
+    """
+    def __init__(self, scale_factor, mode,
+                                  crop_slice=None):
+        super(UpsampleAndCrop, self).__init__()
+        self.upsampler = Upsample(scale_factor=scale_factor, mode=mode)
+        self.crop_module = Crop(crop_slice=crop_slice)
+
+    def forward(self, input):
+        if isinstance(input, tuple):
+            input = input[0]
+        input = self.crop_module(input)
+        output = self.upsampler(input)
+        return output
+
+
+class AutoPad(nn.Module):
+    """
+    Used to auto-pad the multiple UNet inputs passed at different resolutions
+    """
+    def __init__(self):
+        super(AutoPad, self).__init__()
+
+    def forward(self, to_be_padded, out_shape):
+        in_shape = to_be_padded.shape[2:]
+        out_shape = out_shape[2:]
+        if in_shape != out_shape:
+            diff = [trg-orig for orig, trg in zip(in_shape, out_shape)]
+            assert all([d>=0 for d in diff]), "Output shape should be bigger"
+            assert all([d % 2 == 0 for d in diff]), "Odd difference in shape!"
+            # F.pad expects the last dim first:
+            diff.reverse()
+            pad = []
+            for d in diff:
+                pad += [int(d/2), int(d/2)]
+            to_be_padded = torch.nn.functional.pad(to_be_padded, tuple(pad), mode='constant', value=0)
+        return to_be_padded
