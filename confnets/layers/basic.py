@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import warnings
 
+from inferno.extensions.layers.convolutional import ConvActivation
+
 
 class Identity(nn.Module):
     def __init__(self):
@@ -71,3 +73,52 @@ class Upsample(nn.Module):
 
     def forward(self, input):
         return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
+
+
+class ConvNormActivation(ConvActivation):
+    """
+    Convolutional layer with 'SAME' padding by default followed by a normalization and activation layer.
+    (generalization of ConvActivation in inferno)
+    """
+    def __init__(self, in_channels,
+                 out_channels,
+                 kernel_size,
+                 dim,
+                 activation,
+                 normalization=None,
+                 nb_norm_groups=None,
+                 **super_kwargs):
+        super(ConvNormActivation, self).__init__(in_channels, out_channels, kernel_size,
+                                                 dim, activation, **super_kwargs)
+
+        if isinstance(normalization, str):
+            if normalization == "GroupNorm":
+                assert nb_norm_groups is not None
+                self.normalization = getattr(nn, normalization)(num_groups=nb_norm_groups,
+                                                            num_channels=out_channels)
+            else:
+                self.normalization = getattr(nn, normalization)(out_channels)
+        elif isinstance(normalization, nn.Module):
+            if isinstance(normalization, nn.GroupNorm):
+                assert nb_norm_groups is not None
+                self.normalization = normalization(num_groups=nb_norm_groups,
+                                                   num_channels=out_channels)
+            else:
+                self.normalization = normalization(out_channels)
+        elif normalization is None:
+            self.normalization = None
+        else:
+            raise NotImplementedError
+
+    def forward(self, input):
+        conved = self.conv(input)
+        if self.normalization is not None:
+            normalized = self.normalization(conved)
+        else:
+            normalized = conved
+        if self.activation is not None:
+            activated = self.activation(normalized)
+        else:
+            # No activation
+            activated = normalized
+        return activated

@@ -1,7 +1,7 @@
 import torch.nn as nn
 from collections import OrderedDict
 from ..utils import skip_none_sequential, get_padding
-
+from ..layers import ConvNormActivation
 
 class ResBlock(nn.Module):
     """
@@ -206,4 +206,76 @@ class SuperhumanSNEMIBlock(ResBlock):
                 ('norm2', norm_type(out_channels) if norm_type is not None else None),
                 ('activation2', activation())
             ]))
+        )
+
+
+class ConvNormActResBlock(ResBlock):
+    """
+    ResBlock with 'SAME' padding used for Single-Instance Mask prediction
+    and inspired by http://arxiv.org/abs/1909.09872
+    """
+
+    def __init__(self,
+                 f_in,
+                 f_inner=None,
+                 f_out=None,
+                 pre_kernel_size=(1, 3, 3),
+                 kernel_size=(3, 3, 3),
+                 apply_final_activation=True,
+                 apply_final_normalization=True,
+                 dim=3,
+                 activation="ReLU",
+                 stride=1,
+                 normalization="GroupNorm",
+                 nb_norm_groups=None,
+                 dilation=1):
+
+        f_inner = f_in if f_inner is None else f_inner
+        f_out = f_inner if f_out is None else f_out
+
+        skip_con = None
+        if stride != 1 or f_in != f_out:
+            skip_con = ConvNormActivation(f_in, f_out, kernel_size=1, dim=dim,
+                                          activation=activation,
+                                          stride=stride,
+                                          nb_norm_groups=nb_norm_groups,
+                                          normalization=normalization)
+
+        # Construct main layers:
+        conv1 = ConvNormActivation(f_in, f_inner, kernel_size=pre_kernel_size,
+                                   dim=dim,
+                                   activation=activation,
+                                   nb_norm_groups=nb_norm_groups,
+                                   dilation=dilation,
+                                   normalization=normalization)
+        conv2 = ConvNormActivation(f_inner, f_inner,
+                                   kernel_size=kernel_size, dim=dim,
+                                   activation=activation,
+                                   stride=stride,
+                                   dilation=dilation,
+                                   nb_norm_groups=nb_norm_groups,
+                                   normalization=normalization)
+        conv3 = ConvNormActivation(f_inner, f_out,
+                                   kernel_size=kernel_size, dim=dim,
+                                   activation=activation,
+                                   dilation=dilation,
+                                   nb_norm_groups=nb_norm_groups,
+                                   normalization=normalization)
+
+        main = nn.Sequential(
+            conv1, conv2, conv3.conv
+        )
+
+        # Construct post-layers:
+        post = []
+        if apply_final_normalization and conv3.normalization is not None:
+            post.append(conv3.normalization)
+        if apply_final_activation and conv3.activation is not None:
+            post.append(conv3.activation)
+        post = None if len(post) == 0 else nn.Sequential(tuple(post))
+
+        super(ConvNormActResBlock, self).__init__(
+            main,
+            skip=skip_con,
+            post=post
         )
