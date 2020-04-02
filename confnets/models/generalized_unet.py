@@ -7,9 +7,7 @@ from ..layers import Identity, ConvNormActivation, UpsampleAndCrop, Crop
 from .unet import EncoderDecoderSkeleton
 
 
-# TODO: add subclass with one single output at highest depth
-
-class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
+class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
     def __init__(self,
                  depth,
                  in_channels,
@@ -17,36 +15,108 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
                  output_branches_specs,
                  decoder_fmaps=None,
                  number_multiscale_inputs=1,
-                 scale_factor=2,
+                 scale_factor=(1,2,2),
                  res_blocks_specs=None,
                  res_blocks_specs_decoder=None,
                  upsampling_mode='nearest',
                  decoder_crops=None,
-                 return_input=False
+                 return_input=False,
+                 nb_norm_groups=16
                  ):
         """
+        TODO: generalize to 2D
+        TODO: use delayed_init trick and allow inputs with different numbers of channels
+
         Generalized UNet model with the following features:
 
-         - Attach one or more output-branches at any level of the UNet decoder for deep supervision
-                (each branch requires the number of output channels and the final activation)
+         - Possibility to build one or more output-branches at any level of the UNet decoder for deep supervision
          - Optionally, pass multiple inputs at different scales. Features at different levels of
                 the UNet encoder are auto-padded and concatenated to the given inputs.
          - Sum of skip-connections (no concatenation)
          - Downscale with strided conv
+         - ResBlocks implemented with GroupNorm+ReLU
+         - Custom number of 2D or 3D (same-pad-)ResBlocks at different levels of the UNet hierarchy
          - Optionally, perform spatial-crops in the UNet decoder to save memory and crop boundary artifacts
                 (skip-connections are automatically cropped to match)
-         - Custom number of 2D or 3D (same pad) ResBlocks at different levels of the UNet hierarchy
 
 
-        TODO: Add example of output branches (both with list or dictionary, possibly two at the same depth)
 
-        :param res_blocks_specs: None or list of booleans (length depth+1) specifying how many resBlocks we should concatenate
-        at each level. Example:
-            [
-                [False, False], # Two 2D ResBlocks at the highest level
-                [True],         # One 3D ResBlock at the second level of the UNet hierarchy
-                [True, True],   # Two 3D ResBlock at the third level of the UNet hierarchy
-            ]
+        :param encoder_fmaps: (list, tuple) of length depth+1. Make sure to pass values that are divisible by
+                `nb_norm_groups` (ResBlocks are currently implemented with GroupNorm)
+
+        :param decoder_fmaps: (list, tuple) of length depth+1. By default equal to `encoder_fmaps`
+
+        :param output_branches_specs: either list or dictionary (easily configurable from config file) specifying how
+                to construct output branches. For each branch, `out_channels` and `depth` should be specified.
+                Multiple branches can be associated to the same depth.
+
+                Example 1 (list of dictionaries):
+                [
+                    # First branch: foreground-background prediction
+                    {depth: 0, out_channels: 1, activation: "Sigmoid", normalization: None},
+                    # Second branch: embedding prediction
+                    {depth: 0, out_channels: 32, activation: None, normalization: None}
+                ]
+
+                Example 2 (dictionary shown in .yml style):
+                {
+                    # These specs are applied to all branches:
+                    global:
+                        out_channels: 32
+                        normalization: GroupNorm
+                        activation: ReLU
+                        nb_norm_groups: 16
+                    # Foreground-background prediction branch rewrites global specs:
+                    0:
+                        depth: 0
+                        out_channels: 1
+                        activation: "Sigmoid"
+                        normalization: None
+                    # Other emb. branches at different levels in the UNet decoder:
+                    1: {depth: 0}
+                    2: {depth: 1}
+                    3: {depth: 2}
+                }
+
+
+        :param number_multiscale_inputs: At the moment, each input is expected to have the same number
+                of channels `in_channels`.
+                Multiple inputs are expected to be passed in the correct order to the forward method:
+                    self.forward(input_depth_0_full_res, input_depth_1_res_2x, input_depth_2_res_4x, ...)
+
+        :param res_blocks_specs: List of length depth+1 specifying how many resBlocks we should concatenate
+                at each level. Example:
+                    [
+                        [False, False], # Two 2D ResBlocks at the highest level
+                        [True],         # One 3D ResBlock at the second level of the UNet hierarchy
+                        [True, True],   # Two 3D ResBlock at the third level of the UNet hierarchy
+                    ]
+                Default value is None and one 3D block is placed at all levels.
+
+        :param res_blocks_specs_decoder: Same for the decoder. By default `res_blocks_specs` is copied and the
+                UNet architecture is symmetric.
+
+        :param scale_factor: The following options are allowed:
+
+                - Int, e.g. scale_factor=3 gives scale factors (3,3,3) for all depths
+                - List of len==ndim, e.g. [1,3,3] applied to all depths
+                - List of lists specifying factors for each depth, e.g. [ [1,2,2], [1,3,3], [1,3,3] ]
+
+        :param decoder_crops: dictionary of strings specifying the 3D crops to be performed at each level of the
+                UNet decoder. By default is None
+
+                Example:
+                {
+                    0: "1:-1, 8:-8, 8:-8",  # Crop applied at the high-res scale before to output
+                    2: ":, 2:-2, 2:-2"      # Crop applied at depth 2 in the decoder before to upscale
+                }
+
+        :param return_input: If True, the forward method concatenates the input tensors to the output ones.
+                By default is False.
+
+        :param nb_norm_groups: ResBlocks are currently implemented with GroupNorm. So all the passed fmaps should
+                be divisible by this number
+
         """
         assert isinstance(return_input, bool)
         self.return_input = return_input
@@ -62,6 +132,9 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
 
         assert isinstance(number_multiscale_inputs, int)
         self.number_multiscale_inputs = number_multiscale_inputs
+
+        assert isinstance(nb_norm_groups, int)
+        self.nb_norm_groups = nb_norm_groups
 
         def assert_depth_args(f_maps):
             assert isinstance(f_maps, (list, tuple))
@@ -80,17 +153,18 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
 
         # Parse scale factor:
         if isinstance(scale_factor, int):
+            # Only one int factor is passed:
             scale_factor = [scale_factor, ] * depth
-        scale_factors = scale_factor
-        normalized_factors = []
-        for scale_factor in scale_factors:
-            assert isinstance(scale_factor, (int, list, tuple))
-            if isinstance(scale_factor, int):
-                scale_factor = self.dim * [scale_factor]
-            assert len(scale_factor) == self.dim
-            normalized_factors.append(scale_factor)
-        assert len(normalized_factors) == depth
-        self.scale_factors = normalized_factors
+        elif isinstance(scale_factor, (list, tuple)):
+            if isinstance(scale_factor[0], int):
+                # Only one global scale_factor is passed for all depths
+                assert len(scale_factor) == self.dim
+                scale_factor = [scale_factor, ] * depth
+            else:
+                assert len(scale_factor) == self.depth
+                assert all(len(fact) == self.dim for fact in scale_factor)
+
+        self.scale_factors = scale_factor
 
         # Parse res-block specifications:
         if res_blocks_specs is None:
@@ -114,7 +188,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
         assert len(self.decoder_crops) <= depth, "For the moment maximum one crop is supported"
 
         # Build the skeleton:
-        super(MultiInputMultiOutputUNet, self).__init__(depth)
+        super(MultiScaleInputMultiOutput3DUNet, self).__init__(depth)
 
         # Parse output_branches_specs:
         assert isinstance(output_branches_specs, (dict, list))
@@ -134,6 +208,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
                                                               "passed".format(nb_branches)
                 collected_specs[i].update(output_branches_specs[idx])
             output_branches_specs = collected_specs
+        self.output_branches_specs = output_branches_specs
 
         # Build output branches:
         self.output_branches_indices = branch_idxs = {}
@@ -151,6 +226,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
             output_branches_collected.append(self.construct_output_branch(**branch_specs))
         self.output_branches = nn.ModuleList(output_branches_collected)
         print(self.output_branches_indices)
+
 
         self.autopad_feature_maps = AutoPad() if number_multiscale_inputs > 1 else None
 
@@ -226,7 +302,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
             first_conv = ConvNormActivation(f_in, f_out, kernel_size=(1, 5, 5),
                                            dim=3,
                                            activation="ReLU",
-                                           nb_norm_groups=16,
+                                           nb_norm_groups=self.nb_norm_groups,
                                            normalization="GroupNorm")
             # Here the block has a different number of inpiut channels:
             res_block = self.concatenate_res_blocks(f_out, f_out, blocks_spec)
@@ -247,7 +323,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
             last_conv = ConvNormActivation(f_out, f_out, kernel_size=(1, 5, 5),
                        dim=3,
                        activation="ReLU",
-                       nb_norm_groups=16,
+                       nb_norm_groups=self.nb_norm_groups,
                        normalization="GroupNorm")
             res_block = nn.Sequential(res_block, last_conv)
         return res_block
@@ -264,7 +340,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
         conv = ConvNormActivation(self.decoder_fmaps[depth+1], self.decoder_fmaps[depth], kernel_size=(1, 1, 1),
                            dim=3,
                            activation="ReLU",
-                           nb_norm_groups=16,
+                           nb_norm_groups=self.nb_norm_groups,
                            normalization="GroupNorm")
 
         scale_factor = self.scale_factors[depth]
@@ -284,20 +360,22 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
                            stride=scale_factor,
                            valid_conv=True,
                            activation="ReLU",
-                           nb_norm_groups=16,
+                           nb_norm_groups=self.nb_norm_groups,
                            normalization="GroupNorm")
         return sampler
 
 
     def construct_merge_module(self, depth):
-        return MergeSkipConnAndAutoCrop(self.decoder_fmaps[depth], self.encoder_fmaps[depth])
+        return MergeSkipConnAndAutoCrop(self.decoder_fmaps[depth], self.encoder_fmaps[depth],
+                                        nb_norm_groups=self.nb_norm_groups)
 
     def concatenate_res_blocks(self, f_in, f_out, blocks_spec):
         """
         Concatenate multiple residual blocks according to the config file
         """
-        # FIXME: generalize
-        assert f_out % 16 == 0, "Not divisible by group norm!"
+        assert f_out % self.nb_norm_groups == 0, "fmaps {} is not divisible by the given nb_norm_groups {}!".format(
+            f_out, self.nb_norm_groups
+        )
 
         blocks_list = []
         for is_3D in blocks_spec:
@@ -308,7 +386,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
                                                    kernel_size=(3, 3, 3),
                                                    activation="ReLU",
                                                    normalization="GroupNorm",
-                                                   nb_norm_groups=16,
+                                                   nb_norm_groups=self.nb_norm_groups,
                                                    ))
             else:
                 blocks_list.append(SamePadResBlock(f_in, f_inner=f_out,
@@ -316,7 +394,7 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
                                                    kernel_size=(1, 3, 3),
                                                    activation="ReLU",
                                                    normalization="GroupNorm",
-                                                   nb_norm_groups=16,
+                                                   nb_norm_groups=self.nb_norm_groups,
                                                    ))
             f_in = f_out
 
@@ -337,11 +415,50 @@ class MultiInputMultiOutputUNet(EncoderDecoderSkeleton):
         return 3
 
 
+class MultiScaleInput3DUNet(MultiScaleInputMultiOutput3DUNet):
+    def __init__(self,
+                 depth,
+                 in_channels,
+                 encoder_fmaps,
+                 out_channels,
+                 final_activation=None,
+                 final_normalization=None,
+                 final_nb_norm_groups=None,
+                 **super_kwargs
+                 ):
+        """
+        Subclass of MultiScaleInputMultiOutput3DUNet with only one output at the highest level of the UNet decoder.
+        By default only one input is expected.
+
+        For more details about other args/kwargs, see docstring MultiScaleInputMultiOutput3DUNet
+        """
+        # Build specifications for the only output at highest res:
+        output_branches_specs = {
+            "depth": 0,
+             "out_channels": out_channels
+        }
+        if final_activation is not None:
+            output_branches_specs["activation"] = final_activation
+        if final_normalization is not None:
+            output_branches_specs["normalization"] = final_normalization
+        if final_nb_norm_groups is not None:
+            output_branches_specs["nb_norm_groups"] = final_nb_norm_groups
+
+        super(MultiScaleInput3DUNet, self).__init__(
+            depth,
+            in_channels,
+            encoder_fmaps,
+            [output_branches_specs,],
+            **super_kwargs
+        )
+
+
 class MergeSkipConnAndAutoCrop(nn.Module):
     """
     Used in the UNet decoder to merge skip connections from feature maps at lower scales
     """
-    def __init__(self, nb_prev_fmaps, nb_fmaps_skip_conn):
+    def __init__(self, nb_prev_fmaps, nb_fmaps_skip_conn,
+                 nb_norm_groups=16):
         super(MergeSkipConnAndAutoCrop, self).__init__()
         if nb_prev_fmaps == nb_fmaps_skip_conn:
             self.conv = Identity()
@@ -350,7 +467,7 @@ class MergeSkipConnAndAutoCrop(nn.Module):
                                            dim=3,
                                            activation="ReLU",
                                            normalization="GroupNorm",
-                                           nb_norm_groups=16)
+                                           nb_norm_groups=nb_norm_groups)
 
     def forward(self, tensor, skip_connection):
         if tensor.shape[2:] != skip_connection.shape[2:]:

@@ -272,7 +272,7 @@ class SamePadResBlock(ResBlock):
             post.append(conv3.normalization)
         if apply_final_activation and conv3.activation is not None:
             post.append(conv3.activation)
-        post = None if len(post) == 0 else nn.Sequential(tuple(post))
+        post = None if len(post) == 0 else nn.Sequential(*post)
 
         super(SamePadResBlock, self).__init__(
             main,
