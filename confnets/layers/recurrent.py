@@ -4,18 +4,29 @@ import torch.nn as nn
 
 class ConvGRUCell(nn.Module):
     """modified convgru implementation of https://github.com/jacobkimmel/pytorch_convgru"""
-    def __init__(self, input_size, hidden_size, kernel_size, conv_type):
+    def __init__(self, input_size, hidden_size, kernel_size, conv_type, 
+            invert_update_gate=False,
+            out_gate_activation=torch.tanh):
         """
         Generate a convolutional GRU cell
+
+        :param invert_update_gate:
+        :param out_gate_activation:
         """
         super(ConvGRUCell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.invert_update_gate = invert_update_gate
         padding = kernel_size // 2
         hs = hidden_size
         self.reset_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
         self.update_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
         self.out_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+
+        assert callable(out_gate_activation),\
+            "Expected out_gate_activation to be callable, but got {} instead"\
+            .format(type(out_gate_activation))
+        self.out_gate_activation = out_gate_activation
 
         # Initial hidden state
         self.hidden_state = None
@@ -38,12 +49,21 @@ class ConvGRUCell(nn.Module):
             state_size = [batch_size, self.hidden_size] + list(spatial_size)
             self.hidden_state = input_.new(torch.zeros(state_size))
 
-        # data size is [batch, channel, height, width]
+        # if batch size changes, reset hidden state to 0-s.
+        if self.hidden_state.shape[0] != batch_size:
+            self.hidden_state = torch.zeros((batch_size, self.hidden_size, *spatial_size))
+
+        # data size is [batch, channel, ...]
         stacked_inputs = torch.cat([input_, self.hidden_state], dim=1)
         update = torch.sigmoid(self.update_gate(stacked_inputs))
         reset = torch.sigmoid(self.reset_gate(stacked_inputs))
-        out_inputs = torch.tanh(self.out_gate(torch.cat([input_, self.hidden_state * reset], dim=1)))
-        self.hidden_state = self.hidden_state * (1 - update) + out_inputs * update
+        out_inputs = self.out_gate_activation(self.out_gate(torch.cat([input_, self.hidden_state * reset], dim=1)))
+
+        # Sometimes an architecture has these the other way around
+        if not self.invert_update_gate:
+            self.hidden_state = self.hidden_state * (1-update) + out_inputs * update
+        else:
+            self.hidden_state = self.hidden_state * update + out_inputs * (1-update)
 
         return self.hidden_state
 

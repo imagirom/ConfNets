@@ -4,7 +4,7 @@ from collections import OrderedDict
 from functools import partial
 
 from ..nn import delayed_nn as nn
-from ..layers import Identity, Concatenate, Sum, ConvGRU, ShakeShakeMerge, Upsample, MultiplyByScalar
+from ..layers import Identity, Concatenate, Sum, ConvGRU, ShakeShakeMerge, Upsample, MultiplyByScalar, ConvGRUCell
 from ..blocks import SuperhumanSNEMIBlock
 from .. import blocks
 from ..utils import skip_none_sequential, get_padding
@@ -424,53 +424,132 @@ class IsotropicSuperhumanSNEMINet(SuperhumanSNEMINet):
                                     **self.conv_norm_act_dict,
                                     pre_kernel_size=(3, 3, 3), inner_kernel_size=(3, 3, 3))
 
+class RecurrentUNet(UNet2d):
+    """
+    UNet with recurrent skip connections. Made to be like the
+    component Payer et. al. [1] use as part of their Hourglass
+    Network (they employ two stacked RecurrentUNet-s).
+    
+    For more information on ConvGRU (recurrent module choice in
+    this implementation and Payer's work), refer to Ballas et. 
+    al. 2016 [2]
+    
+    ---
+    [1] https://doi.org/10.1016/j.media.2019.06.015
+    [2] https://arxiv.org/abs/1511.06432
 
-# The RecurrentUNet2d is currently not supported. Ask Roman if you are interested in using it.
+    """
+    
+    def __init__(self, hidden_state_size=None, hidden_kernel_size=3, *super_args, **super_kwargs):
+        """
+        Inputs: 
+            :param hidden_state_size (int or list): The number of channels in the hidden state
+            of the ConvGRUCell-s in the skip connections. If None, will use the encoder
+            featuremap size at each level of the network. If list, will use the user specified
+            sizes.
+            :param hidden_kernel_size (int): The kernel size used by the ConvGRU module.
+            default is a 3x3 kernel.
+        """
+        # Sanity check for hidden_state_size and initialization
+        if hidden_state_size is None:
+            # By default, let the number of channels of the hidden state
+            # be equal to the number of channels in the encoder representation.
+            hidden_state_size = super_kwargs['fmaps']  
+        elif isinstance(hidden_state_size, int):
+            assert hidden_state_size > 0, \
+            "'hidden_state_size' must be a positive integer, but got '{}'"\
+            .format(hidden_state_size)
+            self.hidden_state_size = [hidden_state_size] * super_kwargs['depth']
+        elif isinstance(hidden_state_size, (tuple, list)):
+            assert len(hidden_state_size) == super_kwargs['depth']
+        else:
+            raise Exception(
+                "Parameter 'hidden_state_size' must be int or list, but got {}"
+                .format(type(hidden_state_size)))
+        self.hidden_state_size = hidden_state_size
 
-# class RecurrentUNet2d(UNet2d):
-#
-#     def __init__(self,
-#                  scale_factor=2,
-#                  conv_type='Conv2d',
-#                  final_activation=None,
-#                  rec_n_layers=3,
-#                  rec_kernel_sizes=(3, 5, 3),
-#                  rec_hidden_size=(16, 32, 8),
-#                  *super_args, **super_kwargs):
-#         self.rec_n_layers = rec_n_layers
-#         self.rec_kernel_sizes = rec_kernel_sizes
-#         self.rec_hidden_size = rec_hidden_size
-#         self.rec_layers = []
-#
-#         super(UNet2d, self).__init__(scale_factor=scale_factor,
-#                                      conv_type=conv_type,
-#                                      final_activation=final_activation,
-#                                      *super_args, **super_kwargs)
-#
-#     def construct_skip_module(self, depth):
-#         self.rec_layers.append(ConvGRU(input_size=self.fmaps[depth],
-#                                        hidden_size=self.fmaps[depth],
-#                                        kernel_sizes=self.rec_kernel_sizes,
-#                                        n_layers=self.rec_n_layers,
-#                                        conv_type=self.conv_type))
-#
-#         return self.rec_layers[-1]
-#
-#     def set_sequence_length(self, sequence_length):
-#         for r in self.rec_layers:
-#             r.sequence_length = sequence_length
-#
-#     def forward(self, input_):
-#         sequence_length = input_.shape[2]
-#         batch_size = input_.shape[0]
-#         flat_shape = [batch_size * sequence_length] + [input_.shape[1]] + list(input_.shape[3:])
-#         flat_output_shape = [batch_size, sequence_length] + [self.out_channels] + list(input_.shape[3:])
-#
-#         transpose_input = input_.permute((0, 2, 1, 3, 4))\
-#                                 .contiguous()\
-#                                 .view(*flat_shape).detach()
-#
-#         self.set_sequence_length(sequence_length)
-#         output = super(UNet2d, self).forward(transpose_input)
-#         return output.view(*flat_output_shape).permute((0, 2, 1, 3, 4))
+        # Sanity check for hidden_kernel_size
+        assert hidden_kernel_size > 0, \
+            "'hidden_kernel_size' must be a positive integer, but got '{}'"\
+            .format(hidden_kernel_size)
+        self.hidden_kernel_size = hidden_kernel_size
+        
+        super(RecurrentUNet, self).__init__(*super_args, **super_kwargs) 
 
+    # Overrides
+    def construct_input_module(self):
+        f_in = self.in_channels
+        f_out = self.fmaps[0]
+        return nn.Sequential(
+            self.construct_layer(f_in, f_out, kernel_size=1)
+        )
+
+    # Overrides
+    def construct_downsampling_module(self, depth):
+        return nn.MaxPool2d(2)
+
+    # Overrides
+    def construct_encoder_module(self, depth):
+        f_in = self.fmaps[depth]
+        f_out = self.fmaps[depth]
+        return self.construct_layer(f_in, f_out)
+
+    # Overrides
+    def construct_upsampling_module(self, depth):
+        return Upsample(scale_factor=2, mode='nearest')
+
+    # Overrides
+    def construct_decoder_module(self, depth):
+        f_in = self.fmaps[depth]
+        f_out = self.fmaps[depth]
+        return nn.Sequential(
+            self.construct_layer(f_in, f_out),
+        )
+
+    # Overrides
+    def construct_merge_module(self, depth):
+        return Sum()
+
+    # Overrides
+    def construct_base_module(self):
+        # Turn off the connection through the base
+        return MultiplyByScalar(0)
+                
+    # Overrides
+    def construct_skip_module(self, depth):
+        """
+        Construct a recurrent skip connection.
+        """
+        # input_channel_number might also be found as input_size or
+        # featuremap_size, ot f_in in other parts of the code
+        input_channel_number = self.fmaps[depth]
+        hidden_state_size = self.hidden_state_size[depth]
+        return ConvGRUCell(input_channel_number, 
+                            hidden_state_size,
+                            self.hidden_kernel_size,
+                            self.conv_type,
+                            invert_update_gate=True,
+                            out_gate_activation=nn.functional.relu)
+        
+    def forward(self, input_, sequence=False):
+        """        
+        The internal state of the skip connections will update with every image
+        that they work on. The current internal state is used in combination 
+        with the incoming image to produce a better result. 
+        
+        Inputs:
+            :param input_ (Tensor): Shaped (batch, channels, x, y)
+            :param sequence (bool): If True, input_ will be expected as
+            (batch, channels, t, x, y), where the t is the time axis. The output
+            will be of the same shape. A use case is, for example, processing a 
+            batch of videos each with length t (or set batch=1 for a single video).
+        """
+        if sequence:
+            output = torch.zeros(input_.shape)
+            for time_index in range(input_.shape[2]):
+                frame = input_[:,:, time_index, :,:] # (batch, ch, x, y)
+                output[:,:, time_index, :,:] = super(RecurrentUNet, self).forward(frame) 
+        else:
+            output = super(RecurrentUNet, self).forward(input_)
+            
+        return output
