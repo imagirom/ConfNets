@@ -70,4 +70,8 @@ class Upsample(nn.Module):
         self.scale_factor = scale_factor
 
     def forward(self, input):
-        return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
+        if self.mode == 'nearest':
+            # align corners is not supported for mode 'nearest'
+            return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode)
+        else:
+            return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
