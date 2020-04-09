@@ -12,11 +12,11 @@ class ConvGRUCell(nn.Module):
         super(ConvGRUCell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        # padding = kernel_size // 2
+        padding = kernel_size // 2
         hs = hidden_size
-        self.reset_gate = conv_type(input_size + hs, hs, kernel_size)
-        self.update_gate = conv_type(input_size + hs, hs, kernel_size)
-        self.out_gate = conv_type(input_size + hs, hs, kernel_size)
+        self.reset_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+        self.update_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+        self.out_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
 
         # Initial hidden state
         self.hidden_state = None
