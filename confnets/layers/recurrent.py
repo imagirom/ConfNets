@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class ConvGRUCell(nn.Module):
@@ -41,9 +40,9 @@ class ConvGRUCell(nn.Module):
 
         # data size is [batch, channel, height, width]
         stacked_inputs = torch.cat([input_, self.hidden_state], dim=1)
-        update = F.sigmoid(self.update_gate(stacked_inputs))
-        reset = F.sigmoid(self.reset_gate(stacked_inputs))
-        out_inputs = F.tanh(self.out_gate(torch.cat([input_, self.hidden_state * reset], dim=1)))
+        update = torch.sigmoid(self.update_gate(stacked_inputs))
+        reset = torch.sigmoid(self.reset_gate(stacked_inputs))
+        out_inputs = torch.tanh(self.out_gate(torch.cat([input_, self.hidden_state * reset], dim=1)))
         self.hidden_state = self.hidden_state * (1 - update) + out_inputs * update
 
         return self.hidden_state
