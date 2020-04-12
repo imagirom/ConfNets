@@ -7,7 +7,7 @@ from ..layers import Identity, ConvNormActivation, UpsampleAndCrop, Crop
 from .unet import EncoderDecoderSkeleton
 
 
-class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
+class MultiScaleInputMultiOutputUNet(EncoderDecoderSkeleton):
     def __init__(self,
                  depth,
                  in_channels,
@@ -193,7 +193,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         assert len(self.decoder_crops) <= depth, "For the moment maximum one crop is supported"
 
         # Build the skeleton:
-        super(MultiScaleInputMultiOutput3DUNet, self).__init__(depth)
+        super(MultiScaleInputMultiOutputUNet, self).__init__(depth)
 
         # Parse output_branches_specs:
         assert isinstance(output_branches_specs, (dict, list))
@@ -456,7 +456,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
             raise NotImplementedError("Only ndim=2,3 supported atm")
 
 
-class MultiScaleInput3DUNet(MultiScaleInputMultiOutput3DUNet):
+class MultiScaleInputUNet(MultiScaleInputMultiOutputUNet):
     def __init__(self,
                  depth,
                  in_channels,
@@ -468,10 +468,10 @@ class MultiScaleInput3DUNet(MultiScaleInputMultiOutput3DUNet):
                  **super_kwargs
                  ):
         """
-        Subclass of MultiScaleInputMultiOutput3DUNet with only one output at the highest level of the UNet decoder.
+        Subclass of MultiScaleInputMultiOutputUNet with only one output at the highest level of the UNet decoder.
         By default only one input is expected.
 
-        For more details about other args/kwargs, see docstring MultiScaleInputMultiOutput3DUNet
+        For more details about other args/kwargs, see docstring MultiScaleInputMultiOutputUNet
         """
         # Build specifications for the only output at highest res:
         output_branches_specs = {
@@ -485,7 +485,7 @@ class MultiScaleInput3DUNet(MultiScaleInputMultiOutput3DUNet):
         if final_nb_norm_groups is not None:
             output_branches_specs["nb_norm_groups"] = final_nb_norm_groups
 
-        super(MultiScaleInput3DUNet, self).__init__(
+        super(MultiScaleInputUNet, self).__init__(
             depth,
             in_channels,
             encoder_fmaps,
