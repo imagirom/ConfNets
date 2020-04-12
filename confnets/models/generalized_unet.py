@@ -13,6 +13,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
                  in_channels,
                  encoder_fmaps,
                  output_branches_specs,
+                 ndim=3,
                  decoder_fmaps=None,
                  number_multiscale_inputs=1,
                  scale_factor=(1,2,2),
@@ -24,7 +25,6 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
                  nb_norm_groups=16
                  ):
         """
-        TODO: generalize to 2D
         TODO: use delayed_init trick and allow inputs with different numbers of channels
 
         Generalized UNet model with the following features:
@@ -118,6 +118,10 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
                 be divisible by this number
 
         """
+        assert isinstance(ndim, int)
+        assert ndim == 2 or ndim == 3
+        self._dim = ndim
+
         assert isinstance(return_input, bool)
         self.return_input = return_input
 
@@ -168,8 +172,9 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
 
         # Parse res-block specifications:
         if res_blocks_specs is None:
-            # Default: one 3D block per level
-            self.res_blocks_specs = [[True] for _ in range(depth+1)]
+            # Default: one 3D block per level for 3D UNet, otherwise one 2D block
+            default_setup = True if self.dim == 3 else False
+            self.res_blocks_specs = [[default_setup] for _ in range(depth+1)]
         else:
             assert_depth_args(res_blocks_specs)
             assert all(isinstance(itm, list) for itm in res_blocks_specs)
@@ -236,6 +241,9 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         nb_inputs = len(inputs)
         assert nb_inputs == self.number_multiscale_inputs, "The number of inputs does not match the one expected " \
                                                            "by the model"
+        assert all(in_tensor.dim() == self.dim + 2 for in_tensor in inputs), "The dimension of the input tensors do" \
+                                                                             "not match the dimension of the model"
+
 
         encoded_states = []
         current = inputs[0]
@@ -267,6 +275,8 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         if self.return_input:
             outputs = outputs + list(inputs)
 
+        outputs = outputs[0] if len(outputs) == 1 else outputs
+
         return outputs
 
     def construct_output_branch(self,
@@ -278,7 +288,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         out_branch = ConvNormActivation(self.decoder_fmaps[depth],
                                          out_channels=out_channels,
                                          kernel_size=1,
-                                         dim=3,
+                                         dim=self.dim,
                                          activation=activation,
                                          normalization=normalization,
                                          **extra_conv_kwargs)
@@ -299,8 +309,8 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         blocks_spec = deepcopy(self.res_blocks_specs[depth])
 
         if depth == 0:
-            first_conv = ConvNormActivation(f_in, f_out, kernel_size=(1, 5, 5),
-                                           dim=3,
+            first_conv = ConvNormActivation(f_in, f_out, kernel_size=self.pre_kernel_size,
+                                           dim=self.dim,
                                            activation="ReLU",
                                            nb_norm_groups=self.nb_norm_groups,
                                            normalization="GroupNorm")
@@ -320,8 +330,8 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         blocks_spec = deepcopy(self.res_blocks_specs_decoder[depth])
         res_block = self.concatenate_res_blocks(f_in, f_out, blocks_spec)
         if depth == 0:
-            last_conv = ConvNormActivation(f_out, f_out, kernel_size=(1, 5, 5),
-                       dim=3,
+            last_conv = ConvNormActivation(f_out, f_out, kernel_size=self.pre_kernel_size,
+                       dim=self.dim,
                        activation="ReLU",
                        nb_norm_groups=self.nb_norm_groups,
                        normalization="GroupNorm")
@@ -337,15 +347,13 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
 
     def construct_upsampling_module(self, depth):
         # First we need to reduce the numer of channels:
-        conv = ConvNormActivation(self.decoder_fmaps[depth+1], self.decoder_fmaps[depth], kernel_size=(1, 1, 1),
-                           dim=3,
+        conv = ConvNormActivation(self.decoder_fmaps[depth+1], self.decoder_fmaps[depth], kernel_size=1,
+                           dim=self.dim,
                            activation="ReLU",
                            nb_norm_groups=self.nb_norm_groups,
                            normalization="GroupNorm")
 
         scale_factor = self.scale_factors[depth]
-        if scale_factor[0] == 1:
-            assert scale_factor[1] == scale_factor[2]
 
         sampler = UpsampleAndCrop(scale_factor=scale_factor, mode=self.upsampling_mode,
                                   crop_slice=self.decoder_crops.get(depth+1, None))
@@ -356,7 +364,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         scale_factor = self.scale_factors[depth]
         sampler = ConvNormActivation(self.encoder_fmaps[depth], self.encoder_fmaps[depth],
                            kernel_size=scale_factor,
-                           dim=3,
+                           dim=self.dim,
                            stride=scale_factor,
                            valid_conv=True,
                            activation="ReLU",
@@ -367,6 +375,7 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
 
     def construct_merge_module(self, depth):
         return MergeSkipConnAndAutoCrop(self.decoder_fmaps[depth], self.encoder_fmaps[depth],
+                                        dim=self.dim,
                                         nb_norm_groups=self.nb_norm_groups)
 
     def concatenate_res_blocks(self, f_in, f_out, blocks_spec):
@@ -381,17 +390,22 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
         for is_3D in blocks_spec:
             assert isinstance(is_3D, bool)
             if is_3D:
-                blocks_list.append(SamePadResBlock(f_in, f_inner=f_out,
-                                                   pre_kernel_size=(3,3,3),
-                                                   kernel_size=(3, 3, 3),
+                assert self.dim == 3, "3D res-blocks are only supported with a 3D model"
+                blocks_list.append(SamePadResBlock(f_in,
+                                                   dim=self.dim,
+                                                   f_inner=f_out,
+                                                   pre_kernel_size=self.resblock_kernel_size,
+                                                   kernel_size=self.resblock_kernel_size,
                                                    activation="ReLU",
                                                    normalization="GroupNorm",
                                                    nb_norm_groups=self.nb_norm_groups,
                                                    ))
             else:
-                blocks_list.append(SamePadResBlock(f_in, f_inner=f_out,
-                                                   pre_kernel_size=(1, 3, 3),
-                                                   kernel_size=(1, 3, 3),
+                blocks_list.append(SamePadResBlock(f_in,
+                                                   dim=self.dim,
+                                                   f_inner=f_out,
+                                                   pre_kernel_size=self.resblock_kernel_size_2D,
+                                                   kernel_size=self.resblock_kernel_size_2D,
                                                    activation="ReLU",
                                                    normalization="GroupNorm",
                                                    nb_norm_groups=self.nb_norm_groups,
@@ -412,7 +426,34 @@ class MultiScaleInputMultiOutput3DUNet(EncoderDecoderSkeleton):
 
     @property
     def dim(self):
-        return 3
+        return self._dim
+
+    @property
+    def pre_kernel_size(self):
+        if self.dim == 3:
+            return (1, 5, 5)
+        elif self.dim == 2:
+            return (5, 5)
+        else:
+            raise NotImplementedError("Only ndim=2,3 supported atm")
+
+    @property
+    def resblock_kernel_size(self):
+        if self.dim == 3:
+            return (3, 3, 3)
+        elif self.dim == 2:
+            return (3, 3)
+        else:
+            raise NotImplementedError("Only ndim=2,3 supported atm")
+
+    @property
+    def resblock_kernel_size_2D(self):
+        if self.dim == 3:
+            return (1, 3, 3)
+        elif self.dim == 2:
+            return (3, 3)
+        else:
+            raise NotImplementedError("Only ndim=2,3 supported atm")
 
 
 class MultiScaleInput3DUNet(MultiScaleInputMultiOutput3DUNet):
@@ -458,13 +499,14 @@ class MergeSkipConnAndAutoCrop(nn.Module):
     Used in the UNet decoder to merge skip connections from feature maps at lower scales
     """
     def __init__(self, nb_prev_fmaps, nb_fmaps_skip_conn,
+                 dim=3,
                  nb_norm_groups=16):
         super(MergeSkipConnAndAutoCrop, self).__init__()
         if nb_prev_fmaps == nb_fmaps_skip_conn:
             self.conv = Identity()
         else:
-            self.conv = ConvNormActivation(nb_fmaps_skip_conn, nb_prev_fmaps, kernel_size=(1, 1, 1),
-                                           dim=3,
+            self.conv = ConvNormActivation(nb_fmaps_skip_conn, nb_prev_fmaps, kernel_size=1,
+                                           dim=dim,
                                            activation="ReLU",
                                            normalization="GroupNorm",
                                            nb_norm_groups=nb_norm_groups)
