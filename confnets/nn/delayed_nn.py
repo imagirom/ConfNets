@@ -117,7 +117,7 @@ def _infer_input_size(in_tensor):
 
 
 # define wrapping functions for different init arguments
-_wrap_in_channels = _partial(_delayed_init_wrapper, in_channels=_infer_in_channels)
+_wrap_in_and_out_channels = _partial(_delayed_init_wrapper, in_channels=_infer_in_channels, out_channels=_infer_in_channels)
 _wrap_num_channels = _partial(_delayed_init_wrapper, num_channels=_infer_in_channels)
 _wrap_in_features = _partial(_delayed_init_wrapper, in_features=_infer_in_channels)
 _wrap_num_features = _partial(_delayed_init_wrapper, num_features=_infer_in_channels)
@@ -130,12 +130,12 @@ _wrap_bilinear = _partial(
 )
 
 # wrap convolutional layers
-Conv1d = _wrap_in_channels(old.Conv1d)
-Conv2d = _wrap_in_channels(old.Conv2d)
-Conv3d = _wrap_in_channels(old.Conv3d)
-ConvTranspose1d = _wrap_in_channels(old.ConvTranspose1d)
-ConvTranspose2d = _wrap_in_channels(old.ConvTranspose2d)
-ConvTranspose3d = _wrap_in_channels(old.ConvTranspose3d)
+Conv1d = _wrap_in_and_out_channels(old.Conv1d)
+Conv2d = _wrap_in_and_out_channels(old.Conv2d)
+Conv3d = _wrap_in_and_out_channels(old.Conv3d)
+ConvTranspose1d = _wrap_in_and_out_channels(old.ConvTranspose1d)
+ConvTranspose2d = _wrap_in_and_out_channels(old.ConvTranspose2d)
+ConvTranspose3d = _wrap_in_and_out_channels(old.ConvTranspose3d)
 
 # wrap normalization layers
 BatchNorm1d = _wrap_num_features(old.BatchNorm1d)
@@ -180,6 +180,16 @@ if __name__ == '__main__':
         ConvTranspose1d(out_channels=3, kernel_size=1, init_tensor=torch.zeros(1, 2, 10))
     )
 
+    class TestModel(Module):
+        def __init__(self):
+            super(TestModel, self).__init__()
+            self.x = Conv1d(out_channels=5, kernel_size=1)
+
+        def forward(self, input):
+            return self.x(input)
+
+    model = TestModel()
+
     print('before first forward pass:')
     print(model)
 
@@ -189,3 +199,8 @@ if __name__ == '__main__':
 
     print('\nafter first forward pass:')
     print(model)
+
+    torch.save(model, 'test_module.pytorch')
+    model = torch.load('test_module.pytorch')
+    print(model)
+    print(model(inp))

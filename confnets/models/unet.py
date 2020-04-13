@@ -212,7 +212,7 @@ class UNet(UNetSkeleton):
 
         self.skip_factor = skip_factor
 
-        # compute input size divisibiliy constraints
+        # compute input size divisibility constraints
         divisibility_constraint = np.ones(len(self.scale_factors[0]))
         for scale_factor in self.scale_factors:
             divisibility_constraint *= np.array(scale_factor)
@@ -264,7 +264,10 @@ class UNet(UNetSkeleton):
         scale_factor = self.scale_factors[depth]
         if scale_factor[0] == 1:
             assert scale_factor[1] == scale_factor[2]
-        sampler = Upsample(scale_factor=scale_factor, mode=self.upsampling_mode)
+        if self.upsampling_mode != 'transpose_convolution':
+            sampler = Upsample(scale_factor=scale_factor, mode=self.upsampling_mode)
+        else:
+            sampler = nn.ConvTranspose2d(kernel_size=scale_factor, stride=scale_factor)
         return sampler
 
     def forward(self, input_):
