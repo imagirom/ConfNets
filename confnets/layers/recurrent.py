@@ -10,8 +10,11 @@ class ConvGRUCell(nn.Module):
         """
         Generate a convolutional GRU cell
 
-        :param invert_update_gate:
-        :param out_gate_activation:
+        :param invert_update_gate: Change update to 1-update (invert update gate output)
+        when setting the new hidden state. Default is False, and follows the commonly 
+        accepted update equations for GRU.
+        :param out_gate_activation: Callable, function to apply as activation to the out
+        gate. Default is tanh.
         """
         super(ConvGRUCell, self).__init__()
         self.input_size = input_size
