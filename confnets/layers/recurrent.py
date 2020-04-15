@@ -4,18 +4,35 @@ import torch.nn as nn
 
 class ConvGRUCell(nn.Module):
     """modified convgru implementation of https://github.com/jacobkimmel/pytorch_convgru"""
-    def __init__(self, input_size, hidden_size, kernel_size, conv_type):
+    def __init__(self, input_size, hidden_size, kernel_size, conv_type, 
+            invert_update_gate=False,
+            out_gate_activation=torch.tanh):
         """
         Generate a convolutional GRU cell
+
+        :param invert_update_gate: Change update to 1-update (invert update gate output)
+        when setting the new hidden state. Default is False, and follows the commonly 
+        accepted update equations for GRU.
+        :param out_gate_activation: Callable, function to apply as activation to the out
+        gate. Default is tanh.
         """
         super(ConvGRUCell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        # padding = kernel_size // 2
+        self.invert_update_gate = invert_update_gate
+        padding = kernel_size // 2
         hs = hidden_size
-        self.reset_gate = conv_type(input_size + hs, hs, kernel_size)
-        self.update_gate = conv_type(input_size + hs, hs, kernel_size)
-        self.out_gate = conv_type(input_size + hs, hs, kernel_size)
+        self.reset_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+        self.update_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+        self.out_gate = conv_type(input_size + hs, hs, kernel_size, padding=padding)
+
+        assert callable(out_gate_activation),\
+            "Expected out_gate_activation to be callable, but got {} instead"\
+            .format(type(out_gate_activation))
+        self.out_gate_activation = out_gate_activation
+
+        # Initial hidden state
+        self.hidden_state = None
 
         # init.orthogonal(self.reset_gate.weight)
         # init.orthogonal(self.update_gate.weight)
@@ -24,25 +41,34 @@ class ConvGRUCell(nn.Module):
         # init.constant(self.update_gate.bias, 0.)
         # init.constant(self.out_gate.bias, 0.)
 
-    def forward(self, input_, prev_state):
+    def forward(self, input_):
 
         # get batch and spatial sizes
         batch_size = input_.data.size()[0]
         spatial_size = input_.data.size()[2:]
 
-        # generate empty prev_state, if None is provided
-        if prev_state is None:
+        # generate hidden state of zeros, if currently None
+        if self.hidden_state is None:
             state_size = [batch_size, self.hidden_size] + list(spatial_size)
-            prev_state = input_.new(np.zeros(state_size))
+            self.hidden_state = input_.new(torch.zeros(state_size))
 
-        # data size is [batch, channel, height, width]
-        stacked_inputs = torch.cat([input_, prev_state], dim=1)
-        update = F.sigmoid(self.update_gate(stacked_inputs))
-        reset = F.sigmoid(self.reset_gate(stacked_inputs))
-        out_inputs = F.tanh(self.out_gate(torch.cat([input_, prev_state * reset], dim=1)))
-        new_state = prev_state * (1 - update) + out_inputs * update
+        # if batch size changes, reset hidden state to 0-s.
+        if self.hidden_state.shape[0] != batch_size:
+            self.hidden_state = torch.zeros((batch_size, self.hidden_size, *spatial_size))
 
-        return new_state
+        # data size is [batch, channel, ...]
+        stacked_inputs = torch.cat([input_, self.hidden_state], dim=1)
+        update = torch.sigmoid(self.update_gate(stacked_inputs))
+        reset = torch.sigmoid(self.reset_gate(stacked_inputs))
+        out_inputs = self.out_gate_activation(self.out_gate(torch.cat([input_, self.hidden_state * reset], dim=1)))
+
+        # Sometimes an architecture has these the other way around
+        if not self.invert_update_gate:
+            self.hidden_state = self.hidden_state * (1-update) + out_inputs * update
+        else:
+            self.hidden_state = self.hidden_state * update + out_inputs * (1-update)
+
+        return self.hidden_state
 
 
 class ConvGRU(nn.Module):
@@ -107,14 +133,14 @@ class ConvGRU(nn.Module):
             time_index = batch * sl
 
             for idx in range(self.n_layers):
-                upd_cell_hidden = self.cells[idx](input_[time_index:time_index + 1], None).detach()
+                upd_cell_hidden = self.cells[idx](input_[time_index:time_index + 1]).detach()
 
             for s in range(self.sequence_length):
                 x = input_[time_index + s:time_index + s + 1]
                 for layer_idx in range(self.n_layers):
                     cell = self.cells[layer_idx]
                     # pass through layer
-                    upd_cell_hidden = cell(x, upd_cell_hidden)
+                    upd_cell_hidden = cell(x)
 
                 upd_hidden.append(upd_cell_hidden)
 
