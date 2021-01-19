@@ -230,8 +230,6 @@ class MultiScaleInputMultiOutputUNet(EncoderDecoderSkeleton):
                 branch_idxs[depth] = [i]
             output_branches_collected.append(self.construct_output_branch(**branch_specs))
         self.output_branches = nn.ModuleList(output_branches_collected)
-        print(self.output_branches_indices)
-
 
         self.autopad_feature_maps = AutoPad() if number_multiscale_inputs > 1 else None
 
