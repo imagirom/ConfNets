@@ -6,7 +6,7 @@ def _get_submodule(module, path):
     result = module
     for sub in path.split('/'):
         assert hasattr(result, sub), f'Submodule not found: {sub} (in path{path}). ' \
-            f'Available submodules: {[name for name, _ in result.named_submodules()]}'
+            f'Available submodules: {[name for name, _ in result.named_children()]}'
         result = getattr(result, sub)
     return result
 
