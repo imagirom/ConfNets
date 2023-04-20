@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import warnings
 
+from ..utils import parse_data_slice
 
 class Identity(nn.Module):
     def __init__(self):
@@ -75,3 +76,43 @@ class Upsample(nn.Module):
             return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode)
         else:
             return nn.functional.interpolate(input, scale_factor=self.scale_factor, mode=self.mode, align_corners=False)
+
+
+class Crop(nn.Module):
+    """
+    Crop a tensor according to the given string representing the crop slice
+    """
+    def __init__(self, crop_slice):
+        super(Crop, self).__init__()
+        self.crop_slice = crop_slice
+
+        if self.crop_slice is not None:
+            assert isinstance(self.crop_slice, str)
+            self.crop_slice = (slice(None), slice(None)) + parse_data_slice(self.crop_slice)
+
+    def forward(self, input):
+        if isinstance(input, tuple):
+            raise NotImplementedError("At the moment only one input is accepted")
+        if self.crop_slice is not None:
+            return input[self.crop_slice]
+        else:
+            return input
+
+
+class UpsampleAndCrop(nn.Module):
+    """
+    Combination of Upsample and Crop
+    """
+    def __init__(self, scale_factor, mode,
+                                  crop_slice=None):
+        super(UpsampleAndCrop, self).__init__()
+        self.upsampler = Upsample(scale_factor=scale_factor, mode=mode)
+        self.crop_module = Crop(crop_slice=crop_slice)
+
+    def forward(self, input):
+        if isinstance(input, tuple):
+            input = input[0]
+        input = self.crop_module(input)
+        output = self.upsampler(input)
+        return output
+
